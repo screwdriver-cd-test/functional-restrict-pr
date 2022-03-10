@@ -1,0 +1,11 @@
+shared:
+    image: node:14
+    steps:
+        - echo: echo "This PR job can not be executed on same repo branch."
+
+annotations:
+    screwdriver.cd/restrictPR: branch
+
+jobs:
+    main:
+        requires: [ ~pr ]

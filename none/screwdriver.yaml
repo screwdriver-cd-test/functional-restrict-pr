@@ -1,0 +1,11 @@
+shared:
+    image: node:14
+    steps:
+        - echo: echo "This PR job can be executed on all branch (forked branch, same repo branch)."
+
+annotations:
+    screwdriver.cd/restrictPR: none
+
+jobs:
+    main:
+        requires: [ ~pr ]
