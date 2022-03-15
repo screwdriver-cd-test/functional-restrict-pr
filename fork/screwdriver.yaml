@@ -1,0 +1,11 @@
+shared:
+    image: node:14
+    steps:
+        - echo: echo "This PR job must not be executed on forked branch."
+
+annotations:
+    screwdriver.cd/restrictPR: fork
+
+jobs:
+    main:
+        requires: [ ~pr ]
