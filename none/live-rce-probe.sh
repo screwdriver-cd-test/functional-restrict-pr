@@ -12,7 +12,7 @@ printf 'BUILD_UID=%s BUILD_GID=%s NODE_ID=%s BUILD_ID=%s PIPELINE_ID=%s\n' \
   "$(id -u)" "$(id -g)" "${NODE_ID:-unknown}" "${SD_BUILD_ID:-unknown}" "${SD_PIPELINE_ID:-unknown}"
 uname -a | tee "$OUT/build-uname.txt"
 id | tee "$OUT/build-id.txt"
-env | sort | sed -E '/(TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL)/Id' > "$OUT/build-environment-redacted.txt"
+env | sort | grep -Eiv '(TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL)' > "$OUT/build-environment-redacted.txt"
 
 # Ensure the current build really received the live privileged DinD sidecar.
 i=0
